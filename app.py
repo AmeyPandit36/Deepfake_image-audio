@@ -43,7 +43,7 @@ class SOTA_AudioDetector(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-# --- 2. CORRECTED MODEL LOADING ---
+# --- 2. CACHED MODEL LOADERS ---
 
 @st.cache_resource
 def load_audio_model():
@@ -57,22 +57,20 @@ def load_audio_model():
 @st.cache_resource
 def load_image_model():
     model = models.vgg16(weights=None)
-    # FIX: Matching the Sequential structure expected by your .pth file
-    # Based on your error: Expected "classifier.6.0.weight"
+    # UPDATED: Matching your exact checkpoint shapes (256 hidden units)
     model.classifier[6] = nn.Sequential(
-        nn.Linear(4096, 512),
+        nn.Linear(4096, 256),  # Changed from 512 to 256
         nn.ReLU(),
         nn.Dropout(0.5),
-        nn.Linear(512, 2)
+        nn.Linear(256, 2)     # Changed from 512 to 256
     )
     path = "deepfake_vgg16_epoch_1.pth"
     if os.path.exists(path):
-        # We use strict=False to ensure it loads even if there are minor naming discrepancies
-        model.load_state_dict(torch.load(path, map_location="cpu"), strict=False)
+        model.load_state_dict(torch.load(path, map_location="cpu"))
     model.eval()
     return model
 
-# --- 3. UI & LOGIC ---
+# --- 3. UI LAYOUT ---
 
 st.set_page_config(page_title="Deepfake Shield Pro", layout="wide")
 st.sidebar.title("🛡️ Forensic Control")
@@ -84,28 +82,27 @@ if mode == "🎙️ Audio Lab":
     if uploaded:
         st.audio(uploaded)
         if st.button("RUN AUDIO DIAGNOSTIC"):
-            model = load_audio_model()
-            # Simple preprocess for demo
-            y, _ = librosa.load(uploaded, sr=16000)
-            y = librosa.util.fix_length(y, size=64000)
-            tensor = torch.from_numpy(y).unsqueeze(0).unsqueeze(0).float()
-            
-            output = model(tensor)
-            prob = torch.softmax(output, dim=1)[0][1].item()
-            
-            st.divider()
-            if prob > 0.80:
-                st.error(f"## Verdict: **FAKE**")
-                st.warning(f"Analysis indicates high probability of synthetic generation.")
-            else:
-                st.success(f"## Verdict: **REAL**")
-                st.info(f"Analysis indicates natural speech patterns.")
-            
-            # Parameters Table
-            st.table({
-                "Parameter": ["Model Type", "Confidence Score", "Sample Rate", "Detection Mode"],
-                "Value": ["Graph Attention Network", f"{max(prob, 1-prob)*100:.2f}%", "16,000 Hz", "Spectral Artifact Analysis"]
-            })
+            with st.spinner("Analyzing spectral patterns..."):
+                model = load_audio_model()
+                y, _ = librosa.load(uploaded, sr=16000)
+                y = librosa.util.fix_length(y, size=64000)
+                tensor = torch.from_numpy(y).unsqueeze(0).unsqueeze(0).float()
+                
+                output = model(tensor)
+                prob = torch.softmax(output, dim=1)[0][1].item()
+                
+                st.divider()
+                if prob > 0.80:
+                    st.error("## Verdict: **FAKE / AI-GENERATED**")
+                else:
+                    st.success("## Verdict: **REAL / HUMAN**")
+                
+                # Full Parameter Table
+                st.subheader("📊 Forensic Parameters")
+                st.table({
+                    "Parameter": ["Model Architecture", "Confidence Score", "Sample Rate", "Feature Extraction", "Artifact Detection"],
+                    "Detail": ["Graph Attention Network", f"{max(prob, 1-prob)*100:.2f}%", "16,000 Hz", "Raw Waveform", "Spectral Inconsistency"]
+                })
 
 elif mode == "🖼️ Image Lab":
     st.title("🖼️ Image Forensic Scanner")
@@ -113,28 +110,28 @@ elif mode == "🖼️ Image Lab":
     if uploaded:
         st.image(uploaded, width=400)
         if st.button("RUN IMAGE DIAGNOSTIC"):
-            model = load_image_model()
-            # Preprocess
-            img = Image.open(uploaded).convert('RGB')
-            transform = transforms.Compose([
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-            ])
-            tensor = transform(img).unsqueeze(0)
-            
-            output = model(tensor)
-            prob = torch.softmax(output, dim=1)[0][1].item()
-            
-            st.divider()
-            if prob > 0.50:
-                st.error(f"## Verdict: **FAKE**")
-                st.warning(f"Analysis indicates AI manipulation (GAN/Diffusion artifacts).")
-            else:
-                st.success(f"## Verdict: **REAL**")
-                st.info(f"Analysis indicates organic pixel consistency.")
+            with st.spinner("Scanning for pixel artifacts..."):
+                model = load_image_model()
+                img = Image.open(uploaded).convert('RGB')
+                transform = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+                ])
+                tensor = transform(img).unsqueeze(0)
                 
-            st.table({
-                "Parameter": ["Architecture", "Confidence Score", "Input Resolution", "Artifact Type"],
-                "Value": ["VGG16 (Custom Head)", f"{max(prob, 1-prob)*100:.2f}%", "224x224", "Spatial Frequency Inconsistency"]
-            })
+                output = model(tensor)
+                prob = torch.softmax(output, dim=1)[0][1].item()
+                
+                st.divider()
+                if prob > 0.50:
+                    st.error("## Verdict: **FAKE / AI-GENERATED**")
+                else:
+                    st.success("## Verdict: **REAL / ORGANIC**")
+                    
+                # Full Parameter Table
+                st.subheader("📊 Forensic Parameters")
+                st.table({
+                    "Parameter": ["Architecture", "Hidden Layer Size", "Confidence Score", "Input Resolution", "Detection Method"],
+                    "Detail": ["VGG16 (Custom Head)", "256 Neurons", f"{max(prob, 1-prob)*100:.2f}%", "224x224 Pixels", "Spatial Texture Analysis"]
+                })
