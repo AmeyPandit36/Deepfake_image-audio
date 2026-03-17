@@ -4,16 +4,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import librosa
-import librosa.display
 import os
-import tempfile
-import matplotlib.pyplot as plt
 from PIL import Image
 import torchvision.transforms as transforms
+import torchvision.models as models
 
 # --- 1. MODEL ARCHITECTURES ---
 
-# [AUDIO] GAT Model
+# [AUDIO] GAT Model Architecture
 class EfficientGraphAttention(nn.Module):
     def __init__(self, embed_dim):
         super().__init__()
@@ -47,99 +45,87 @@ class SOTA_AudioDetector(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-# [IMAGE] Example architecture - Replace with your ResNet/ViT class from Notebook 3
-class SOTA_ImageDetector(nn.Module):
-    def __init__(self):
-        super().__init__()
-        # Replace this with your actual notebook architecture
-        self.base = nn.Sequential(
-            nn.Conv2d(3, 32, 3), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Flatten(), nn.Linear(32 * 111 * 111, 2)
-        )
-    def forward(self, x): return self.base(x)
+# --- 2. CACHED MODEL LOADING (Prevents Crash) ---
 
-# --- 2. PREPROCESSING HELPERS ---
+@st.cache_resource
+def load_audio_model():
+    model = SOTA_AudioDetector()
+    if os.path.exists("sota_deepfake_detector.pth"):
+        model.load_state_dict(torch.load("sota_deepfake_detector.pth", map_location="cpu"))
+    model.eval()
+    return model
 
-def process_pro_audio(uploaded_file):
-    y, sr = librosa.load(uploaded_file, sr=16000, mono=True)
-    intervals = librosa.effects.split(y, top_db=25)
-    y_speech = np.concatenate([y[start:end] for start, end in intervals]) if len(intervals) > 0 else y
-    window_size, hop_length = 64000, 32000
-    chunks = []
-    for i in range(0, len(y_speech) - window_size + 1, hop_length):
-        chunk = y_speech[i : i + window_size]
-        peak = np.max(np.abs(chunk))
-        if peak > 0: chunk = chunk / peak
-        chunks.append(chunk)
-    if not chunks:
-        chunks.append(librosa.util.fix_length(y_speech, size=window_size))
-    return torch.from_numpy(np.array(chunks)).unsqueeze(1).float()
+@st.cache_resource
+def load_image_model():
+    # Assuming VGG16 based on your filename 'deepfake_vgg16_epoch_1.pth'
+    model = models.vgg16(weights=None)
+    model.classifier[6] = nn.Linear(4096, 2) 
+    if os.path.exists("deepfake_vgg16_epoch_1.pth"):
+        model.load_state_dict(torch.load("deepfake_vgg16_epoch_1.pth", map_location="cpu"))
+    model.eval()
+    return model
 
-def process_image(uploaded_file):
-    image = Image.open(uploaded_file).convert('RGB')
+# --- 3. PREPROCESSING ---
+
+def process_audio(file):
+    y, sr = librosa.load(file, sr=16000)
+    # Remove silence
+    y, _ = librosa.effects.trim(y)
+    # Standardize to 4 seconds
+    y = librosa.util.fix_length(y, size=64000)
+    # Peak Norm
+    y = y / (np.max(np.abs(y)) + 1e-7)
+    return torch.from_numpy(y).unsqueeze(0).unsqueeze(0).float()
+
+def process_image(file):
+    img = Image.open(file).convert('RGB')
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
-    return transform(image).unsqueeze(0)
+    return transform(img).unsqueeze(0)
 
-# --- 3. STREAMLIT UI ---
+# --- 4. UI ---
 
-st.set_page_config(page_title="Deepfake Shield | Multi-Modal Lab", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Deepfake Shield", layout="wide")
+st.sidebar.title("🛡️ Forensic Control")
+mode = st.sidebar.radio("Module", ["Audio Lab", "Image Lab"])
 
-with st.sidebar:
-    st.title("🛡️ Deepfake Shield")
-    mode = st.radio("Navigation", ["🏠 Home", "🎙️ Audio Lab", "🖼️ Image Lab"])
-    st.divider()
-    st.info("Forensic Tools for Multi-Modal AI Detection")
-
-if mode == "🏠 Home":
-    st.title("Deepfake Shield Portal")
-    st.markdown("""
-    Welcome to your unified forensic laboratory. This portal uses **Graph Attention Networks** for audio 
-    and **Convolutional Transformers** for image analysis to identify AI manipulation.
-    
-    ### Modules:
-    1. **Audio Lab:** Scans waveforms for synthetic spectral artifacts.
-    2. **Image Lab:** Detects GAN/Diffusion-based pixel inconsistencies.
-    """)
-
-elif mode == "🎙️ Audio Lab":
+if mode == "Audio Lab":
     st.title("🎙️ Audio Forensic Scanner")
-    uploaded_audio = st.file_uploader("Upload Clip", type=["wav", "mp3", "m4a"])
-    if uploaded_audio:
-        st.audio(uploaded_audio)
-        if st.button("Run Audio Scan"):
-            with st.spinner("Analyzing spectral patterns..."):
-                model = SOTA_AudioDetector()
-                if os.path.exists("sota_deepfake_detector.pth"):
-                    model.load_state_dict(torch.load("sota_deepfake_detector.pth", map_location='cpu'))
-                model.eval()
-                
-                input_batch = process_pro_audio(uploaded_audio)
-                with torch.no_grad():
-                    probs = torch.softmax(model(input_batch), dim=1)
-                    avg_fake = torch.mean(probs[:, 1]).item()
-                
-                if avg_fake > 0.90: st.error(f"🚨 SYNTHETIC DETECTED ({avg_fake*100:.1f}%)")
-                elif avg_fake > 0.45: st.warning(f"⚠️ INCONCLUSIVE / COMPRESSION ({avg_fake*100:.1f}%)")
-                else: st.success(f"✅ VERIFIED HUMAN")
+    uploaded = st.file_uploader("Upload Audio", type=["wav", "mp3"])
+    if uploaded:
+        st.audio(uploaded)
+        if st.button("DIAGNOSE AUDIO"):
+            model = load_audio_model()
+            tensor = process_audio(uploaded)
+            output = model(tensor)
+            prob = torch.softmax(output, dim=1)[0][1].item()
+            
+            st.subheader("Result Analysis")
+            if prob > 0.85:
+                st.error(f"### FINAL VERDICT: **FAKE**")
+                st.write(f"Confidence: {prob*100:.2f}% (Synthetic signature detected)")
+            else:
+                st.success(f"### FINAL VERDICT: **REAL**")
+                st.write(f"Confidence: {(1-prob)*100:.2f}% (Human speech profile)")
 
-elif mode == "🖼️ Image Lab":
-    st.title("🖼️ Image Artifact Scanner")
-    uploaded_img = st.file_uploader("Upload Image", type=["jpg", "jpeg", "png"])
-    if uploaded_img:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(uploaded_img, caption="Target Image", use_container_width=True)
-        
-        if st.button("Run Image Scan"):
-            with st.spinner("Scanning pixel geometry..."):
-                # Load your Image model weights here
-                # img_model = SOTA_ImageDetector()
-                # img_model.load_state_dict(torch.load("image_model.pth"))
-                
-                img_tensor = process_image(uploaded_img)
-                # (Prediction logic similar to audio)
-                st.info("Scan complete: Facial features show high structural organic consistency.")
+elif mode == "Image Lab":
+    st.title("🖼️ Image Forensic Scanner")
+    uploaded = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
+    if uploaded:
+        st.image(uploaded, width=400)
+        if st.button("DIAGNOSE IMAGE"):
+            model = load_image_model()
+            tensor = process_image(uploaded)
+            output = model(tensor)
+            prob = torch.softmax(output, dim=1)[0][1].item()
+            
+            st.subheader("Result Analysis")
+            if prob > 0.5:
+                st.error(f"### FINAL VERDICT: **FAKE**")
+                st.write(f"Confidence: {prob*100:.2f}% (AI-generated artifacts found)")
+            else:
+                st.success(f"### FINAL VERDICT: **REAL**")
+                st.write(f"Confidence: {(1-prob)*100:.2f}% (Organic pixel consistency)")
